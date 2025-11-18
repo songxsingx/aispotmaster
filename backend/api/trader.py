@@ -132,3 +132,119 @@ async def delete_trader(trader_id: str):
         "message": "交易员已删除",
         "data": {"trader_id": trader_id}
     }
+
+
+@router.get("/{trader_id}/pnl")
+async def get_trader_pnl(trader_id: str):
+    """
+    获取交易员盈亏数据
+    
+    返回:
+    - realized_pnl: 已实现盈亏（已完成的买卖对）
+    - unrealized_pnl: 未实现盈亏（当前持仓）
+    - total_pnl: 总盈亏
+    - pnl_pct: 盈亏率百分比
+    - total_cost: 总成本
+    - current_value: 当前价值
+    """
+    from core.exchange import GateIOExchange
+    from config import settings
+    import sqlite3
+    
+    # 检查交易员是否存在
+    trader = trader_engine.get_trader(trader_id)
+    if not trader:
+        raise HTTPException(status_code=404, detail="交易员不存在")
+    
+    try:
+        # 1. 从数据库获取所有交易记录
+        conn = sqlite3.connect('data/database.db')
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT action, price, amount FROM trades WHERE trader_id = ? ORDER BY id",
+            (trader_id,)
+        )
+        trades = cursor.fetchall()
+        conn.close()
+        
+        if not trades:
+            return {
+                "code": 0,
+                "data": {
+                    "realized_pnl": 0.0,
+                    "unrealized_pnl": 0.0,
+                    "total_pnl": 0.0,
+                    "pnl_pct": 0.0,
+                    "total_cost": 0.0,
+                    "current_value": 0.0,
+                    "current_position": 0.0,
+                    "current_price": 0.0
+                }
+            }
+        
+        # 2. 计算持仓和成本
+        total_bought = 0.0  # 总买入数量
+        total_buy_cost = 0.0  # 总买入成本
+        total_sold = 0.0  # 总卖出数量
+        total_sell_revenue = 0.0  # 总卖出收入
+        
+        for trade in trades:
+            if trade[0] == 'buy':
+                total_bought += trade[2]
+                total_buy_cost += trade[1] * trade[2]
+            elif trade[0] == 'sell':
+                total_sold += trade[2]
+                total_sell_revenue += trade[1] * trade[2]
+        
+        # 3. 当前持仓
+        current_position = total_bought - total_sold
+        
+        # 4. 已实现盈亏（已卖出部分）
+        if total_sold > 0:
+            avg_buy_price = total_buy_cost / total_bought if total_bought > 0 else 0
+            realized_pnl = total_sell_revenue - (avg_buy_price * total_sold)
+        else:
+            realized_pnl = 0.0
+        
+        # 5. 未实现盈亏（当前持仓）
+        unrealized_pnl = 0.0
+        current_price = 0.0
+        current_value = 0.0
+        
+        if current_position > 0:
+            # 获取当前市场价格
+            exchange = GateIOExchange(settings.gate_api_key, settings.gate_api_secret, testnet=settings.gate_testnet)
+            ticker = exchange.get_ticker(trader['symbol'])
+            current_price = ticker['last']
+            
+            # 当前持仓的平均成本
+            remaining_cost = total_buy_cost - (total_buy_cost / total_bought * total_sold) if total_bought > 0 else 0
+            
+            # 当前持仓的市场价值
+            current_value = current_position * current_price
+            
+            # 未实现盈亏 = 当前价值 - 剩余成本
+            unrealized_pnl = current_value - remaining_cost
+        
+        # 6. 总盈亏
+        total_pnl = realized_pnl + unrealized_pnl
+        
+        # 7. 盈亏率
+        pnl_pct = (total_pnl / total_buy_cost * 100) if total_buy_cost > 0 else 0.0
+        
+        return {
+            "code": 0,
+            "data": {
+                "realized_pnl": round(realized_pnl, 2),
+                "unrealized_pnl": round(unrealized_pnl, 2),
+                "total_pnl": round(total_pnl, 2),
+                "pnl_pct": round(pnl_pct, 2),
+                "total_cost": round(total_buy_cost, 2),
+                "current_value": round(current_value, 2),
+                "current_position": current_position,
+                "current_price": round(current_price, 2) if current_price > 0 else 0.0
+            }
+        }
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"计算盈亏失败: {str(e)}")

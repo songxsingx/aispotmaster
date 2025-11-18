@@ -2,6 +2,7 @@
 import json
 import sqlite3
 import threading
+import time
 from typing import Dict, Optional
 from core.exchange import GateIOExchange
 from strategy.grid import GridStrategy
@@ -21,8 +22,15 @@ class TraderEngine:
             testnet=settings.gate_testnet
         )
         
+        # ✅ Phase 3.5 - P2: 监控告警
+        self.last_heartbeat: Dict[str, float] = {}  # trader_id -> timestamp
+        self.alert_log: list = []  # 告警日志
+        
         # 初始化数据库
         self._init_database()
+        
+        # 启动监控线程
+        self._start_monitor()
     
     def _init_database(self):
         """初始化数据库"""
@@ -32,6 +40,26 @@ class TraderEngine:
         # 执行traders表迁移
         with open('data/migrations/002_traders.sql', 'r') as f:
             cursor.executescript(f.read())
+        
+        # ✅ Phase 3.5 - P0: 执行持仓追踪迁移（忽略重复字段错误）
+        try:
+            # 读取并执行迁移脚本，但忽略ALTER TABLE重复错误
+            with open('data/migrations/003_position_tracking.sql', 'r') as f:
+                migration_sql = f.read()
+                # 逐条执行SQL，忽略重复字段错误
+                for statement in migration_sql.split(';'):
+                    statement = statement.strip()
+                    if statement and not statement.startswith('--'):
+                        try:
+                            cursor.execute(statement)
+                        except sqlite3.OperationalError as e:
+                            # 忽略"duplicate column"错误
+                            if 'duplicate column' not in str(e).lower():
+                                print(f"⚠️ 数据库迁移警告: {e}")
+            conn.commit()
+            print("✅ 持仓追踪迁移完成")
+        except Exception as e:
+            print(f"⚠️ 持仓追踪迁移失败: {e}")
         
         # 重置所有running状态为stopped（因为后端重启后线程丢失）
         cursor.execute("UPDATE traders SET status = 'stopped' WHERE status = 'running'")
@@ -164,6 +192,9 @@ class TraderEngine:
         self.traders[trader_id] = thread
         self.strategies[trader_id] = strategy
         
+        # ✅ Phase 3.5 - P2: 初始化心跳
+        self.update_heartbeat(trader_id)
+        
         # 更新数据库状态
         self._update_trader_status(trader_id, 'running')
         
@@ -227,6 +258,94 @@ class TraderEngine:
         conn.close()
         
         return affected > 0
+    
+    def _start_monitor(self):
+        """✅ Phase 3.5 - P2: 启动监控线程"""
+        monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
+        monitor_thread.start()
+        print("✅ 监控告警系统已启动")
+    
+    def _monitor_loop(self):
+        """监控循环"""
+        while True:
+            try:
+                self._check_balance_alert()
+                self._check_position_alert()
+                self._check_heartbeat_alert()
+            except Exception as e:
+                print(f"⚠️ 监控异常: {e}")
+            
+            time.sleep(60)  # 每分钟检查一次
+    
+    def _check_balance_alert(self):
+        """✅ Phase 3.5 - P2: 余额预警"""
+        try:
+            balance = self.exchange.get_balance('USDT')
+            usdt_free = balance.get('free', 0)
+            
+            if usdt_free < 10:
+                alert_msg = f"⚠️ 余额预警: USDT余额不足 ({usdt_free:.2f} USDT < 10 USDT)"
+                self._log_alert('balance', alert_msg)
+        except Exception as e:
+            print(f"余额检查失败: {e}")
+    
+    def _check_position_alert(self):
+        """✅ Phase 3.5 - P2: 持仓异常预警"""
+        try:
+            conn = sqlite3.connect('data/database.db')
+            cursor = conn.cursor()
+            
+            # 检查所有交易员的最新持仓
+            cursor.execute("""
+                SELECT trader_id, position_after 
+                FROM trades 
+                WHERE id IN (
+                    SELECT MAX(id) FROM trades GROUP BY trader_id
+                )
+                AND position_after < 0
+            """)
+            
+            negative_positions = cursor.fetchall()
+            conn.close()
+            
+            for trader_id, position in negative_positions:
+                alert_msg = f"🚨 持仓异常: {trader_id} 出现负持仓 ({position:.6f} BTC)"
+                self._log_alert('position', alert_msg)
+        except Exception as e:
+            print(f"持仓检查失败: {e}")
+    
+    def _check_heartbeat_alert(self):
+        """✅ Phase 3.5 - P2: 心跳检测"""
+        current_time = time.time()
+        
+        for trader_id, strategy in self.strategies.items():
+            if trader_id in self.last_heartbeat:
+                elapsed = current_time - self.last_heartbeat[trader_id]
+                
+                # 5分钟无更新
+                if elapsed > 300:
+                    alert_msg = f"💔 心跳异常: {trader_id} 已 {int(elapsed/60)} 分钟无响应"
+                    self._log_alert('heartbeat', alert_msg)
+    
+    def _log_alert(self, alert_type: str, message: str):
+        """✅ Phase 3.5 - P2: 记录告警"""
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        alert_entry = {
+            'type': alert_type,
+            'message': message,
+            'timestamp': timestamp
+        }
+        
+        self.alert_log.append(alert_entry)
+        print(f"[{timestamp}] {message}")
+        
+        # 保留最近100条告警
+        if len(self.alert_log) > 100:
+            self.alert_log = self.alert_log[-100:]
+    
+    def update_heartbeat(self, trader_id: str):
+        """✅ Phase 3.5 - P2: 更新心跳"""
+        self.last_heartbeat[trader_id] = time.time()
 
 
 # 全局交易员引擎实例

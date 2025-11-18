@@ -11,6 +11,8 @@ interface Trader {
     amount: number
     grid_gap: number
     check_interval: number
+    stop_loss_pct?: number
+    take_profit_pct?: number
   }
   created_at: number
   runtime_status?: {
@@ -18,7 +20,24 @@ interface Trader {
     last_price: number | null
     last_action: string | null
     trade_count: number
+    current_position?: number
   }
+}
+
+interface TraderPnL {
+  realized_pnl: number
+  unrealized_pnl: number
+  total_pnl: number
+  pnl_pct: number
+  total_cost: number
+  current_value: number
+  current_position: number
+  current_price: number
+}
+
+interface Balance {
+  usdt: { free: number; used: number; total: number }
+  btc: { free: number; used: number; total: number }
 }
 
 interface Props {
@@ -29,21 +48,68 @@ function Traders({ onViewDetail }: Props) {
   const [traders, setTraders] = useState<Trader[]>([])
   const [loading, setLoading] = useState(false)
   const [showCreateForm, setShowCreateForm] = useState(true)  // 默认展开表单
+  const [pnlData, setPnlData] = useState<Record<string, TraderPnL>>({})
+  const [balance, setBalance] = useState<Balance | null>(null)
+  const [currentTime, setCurrentTime] = useState(Date.now())
   
   // 表单状态
   const [name, setName] = useState('网格交易员')
   const [amount, setAmount] = useState('0.0005')
   const [gridGap, setGridGap] = useState('2.0')
   const [checkInterval, setCheckInterval] = useState('60')
+  const [stopLoss, setStopLoss] = useState('')
+  const [takeProfit, setTakeProfit] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)  // 默认折叠高级选项
 
   // 加载交易员列表
   const loadTraders = async () => {
     try {
       const response = await apiClient.get('/api/traders')
-      setTraders(response.data.data)
+      const tradersList = response.data.data
+      setTraders(tradersList)
+      
+      // 加载每个交易员的盈亏数据
+      for (const trader of tradersList) {
+        loadPnL(trader.id)
+      }
     } catch (error) {
       console.error('加载交易员失败:', error)
     }
+  }
+
+  // 加载盈亏数据
+  const loadPnL = async (traderId: string) => {
+    try {
+      const response = await apiClient.get(`/api/traders/${traderId}/pnl`)
+      setPnlData(prev => ({
+        ...prev,
+        [traderId]: response.data.data
+      }))
+    } catch (error) {
+      console.error(`加载盈亏失败 (${traderId}):`, error)
+    }
+  }
+
+  // ✅ Phase 3.5 - P2: 加载账户余额
+  const loadBalance = async () => {
+    try {
+      const response = await apiClient.get('/api/balance')
+      setBalance(response.data.data)
+    } catch (error) {
+      console.error('加载余额失败:', error)
+    }
+  }
+
+  // ✅ Phase 3.5 - P2: 计算运行时长
+  const formatRuntime = (createdAt: number) => {
+    const seconds = Math.floor((currentTime - createdAt * 1000) / 1000)
+    const days = Math.floor(seconds / 86400)
+    const hours = Math.floor((seconds % 86400) / 3600)
+    const minutes = Math.floor((seconds % 3600) / 60)
+    
+    if (days > 0) return `${days}天${hours}小时`
+    if (hours > 0) return `${hours}小时${minutes}分钟`
+    return `${minutes}分钟`
   }
 
   // 创建交易员
@@ -55,20 +121,32 @@ function Traders({ onViewDetail }: Props) {
 
     setLoading(true)
     try {
+      const config: any = {
+        amount: parseFloat(amount),
+        grid_gap: parseFloat(gridGap),
+        check_interval: parseInt(checkInterval)
+      }
+      
+      // 添加止损止盈（如果设置）
+      if (stopLoss && parseFloat(stopLoss) < 0) {
+        config.stop_loss_pct = parseFloat(stopLoss)
+      }
+      if (takeProfit && parseFloat(takeProfit) > 0) {
+        config.take_profit_pct = parseFloat(takeProfit)
+      }
+      
       await apiClient.post('/api/traders', {
         name: name.trim(),
         strategy: 'grid',
         symbol: 'BTC/USDT',
-        config: {
-          amount: parseFloat(amount),
-          grid_gap: parseFloat(gridGap),
-          check_interval: parseInt(checkInterval)
-        }
+        config
       })
       
       alert('交易员创建成功！')
       setShowCreateForm(false)
       setName('网格交易员')
+      setStopLoss('')
+      setTakeProfit('')
       await loadTraders()
     } catch (error: any) {
       alert('创建失败: ' + (error.response?.data?.detail || error.message))
@@ -125,9 +203,14 @@ function Traders({ onViewDetail }: Props) {
 
   useEffect(() => {
     loadTraders()
+    loadBalance()
     
     // 每5秒刷新一次
-    const interval = setInterval(loadTraders, 5000)
+    const interval = setInterval(() => {
+      loadTraders()
+      loadBalance()
+      setCurrentTime(Date.now())
+    }, 5000)
     return () => clearInterval(interval)
   }, [])
 
@@ -135,20 +218,39 @@ function Traders({ onViewDetail }: Props) {
     <div style={{ padding: '20px', fontFamily: 'Arial, sans-serif', maxWidth: '1200px', margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h1>🤖 交易员管理</h1>
-        <button
-          onClick={() => setShowCreateForm(!showCreateForm)}
-          style={{
-            padding: '10px 20px',
-            backgroundColor: showCreateForm ? '#95a5a6' : '#3498db',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            fontWeight: 'bold'
-          }}
-        >
-          {showCreateForm ? '取消' : '➕ 创建交易员'}
-        </button>
+        <div style={{ display: 'flex', gap: '20px', alignItems: 'center' }}>
+          {/* ✅ Phase 3.5 - P2: 账户余额显示 */}
+          {balance && (
+            <div style={{
+              padding: '10px 20px',
+              backgroundColor: '#f8f9fa',
+              borderRadius: '6px',
+              border: '1px solid #dee2e6',
+              fontSize: '14px'
+            }}>
+              <span style={{ marginRight: '15px' }}>
+                💵 USDT: <strong>{balance.usdt.free.toFixed(2)}</strong>
+              </span>
+              <span>
+                ₿ BTC: <strong>{balance.btc.free.toFixed(6)}</strong>
+              </span>
+            </div>
+          )}
+          <button
+            onClick={() => setShowCreateForm(!showCreateForm)}
+            style={{
+              padding: '10px 20px',
+              backgroundColor: showCreateForm ? '#95a5a6' : '#3498db',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer',
+              fontWeight: 'bold'
+            }}
+          >
+            {showCreateForm ? '取消' : '➕ 创建交易员'}
+          </button>
+        </div>
       </div>
 
       {/* 创建表单 */}
@@ -244,6 +346,80 @@ function Traders({ onViewDetail }: Props) {
               </div>
             </div>
 
+            {/* ✅ Phase 3.5 - P1: 止损止盈配置（高级选项） */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                style={{
+                  padding: '6px 12px',
+                  backgroundColor: '#f8f9fa',
+                  border: '1px solid #ddd',
+                  borderRadius: '4px',
+                  cursor: 'pointer',
+                  fontSize: '13px',
+                  marginBottom: '10px'
+                }}
+              >
+                {showAdvanced ? '▼' : '▶'} 高级选项（止损止盈）
+              </button>
+              
+              {showAdvanced && (
+                <div style={{ 
+                  padding: '15px', 
+                  backgroundColor: '#fff3cd', 
+                  borderRadius: '4px',
+                  border: '1px solid #ffc107'
+                }}>
+                  <div style={{ marginBottom: '10px', fontSize: '13px', color: '#856404' }}>
+                    ⚠️ 止损止盈触发后将自动卖出全部持仓并停止策略
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
+                    <div>
+                      <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
+                        止损 (%)（负数，如-10）:
+                      </label>
+                      <input
+                        type="number"
+                        value={stopLoss}
+                        onChange={(e) => setStopLoss(e.target.value)}
+                        placeholder="不设置则留空"
+                        step="1"
+                        max="-1"
+                        style={{
+                          width: '100%',
+                          padding: '8px',
+                          border: '1px solid #ddd',
+                          borderRadius: '4px',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ display: 'block', marginBottom: '5px', fontWeight: 'bold', fontSize: '13px' }}>
+                        止盈 (%)（正数，如20）:
+                      </label>
+                      <input
+                        type="number"
+                        value={takeProfit}
+                        onChange={(e) => setTakeProfit(e.target.value)}
+                        placeholder="不设置则留空"
+                        step="1"
+                        min="1"
+                        style={{
+                          width: '100%',
+                          padding: '8px',
+                          border: '1px solid #ddd',
+                          borderRadius: '4px',
+                          boxSizing: 'border-box'
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
             <button
               onClick={handleCreate}
               disabled={loading}
@@ -305,10 +481,27 @@ function Traders({ onViewDetail }: Props) {
                     </span>
                   </div>
 
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '10px' }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px', marginBottom: '10px' }}>
                     <div>
                       <span style={{ color: '#7f8c8d', fontSize: '13px' }}>交易对:</span>
                       <div style={{ fontWeight: 'bold' }}>{trader.symbol}</div>
+                    </div>
+                    <div>
+                      <span style={{ color: '#7f8c8d', fontSize: '13px' }}>创建时间:</span>
+                      <div style={{ fontWeight: 'bold', fontSize: '12px' }}>
+                        {new Date(trader.created_at * 1000).toLocaleString('zh-CN', {
+                          month: '2-digit',
+                          day: '2-digit',
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </div>
+                    </div>
+                    <div>
+                      <span style={{ color: '#7f8c8d', fontSize: '13px' }}>运行时长:</span>
+                      <div style={{ fontWeight: 'bold', color: trader.status === 'running' ? '#27ae60' : '#7f8c8d' }}>
+                        {formatRuntime(trader.created_at)}
+                      </div>
                     </div>
                     <div>
                       <span style={{ color: '#7f8c8d', fontSize: '13px' }}>每次交易:</span>
@@ -318,11 +511,81 @@ function Traders({ onViewDetail }: Props) {
                       <span style={{ color: '#7f8c8d', fontSize: '13px' }}>网格间隔:</span>
                       <div style={{ fontWeight: 'bold' }}>{trader.config.grid_gap}%</div>
                     </div>
-                    <div>
-                      <span style={{ color: '#7f8c8d', fontSize: '13px' }}>检查间隔:</span>
-                      <div style={{ fontWeight: 'bold' }}>{trader.config.check_interval}秒</div>
-                    </div>
                   </div>
+
+                  {/* ✅ Phase 3.5 - P1: 盈亏显示 */}
+                  {pnlData[trader.id] && (
+                    <div style={{
+                      padding: '12px',
+                      backgroundColor: pnlData[trader.id].total_pnl >= 0 ? '#e8f5e9' : '#ffebee',
+                      borderRadius: '6px',
+                      marginBottom: '10px',
+                      border: `2px solid ${pnlData[trader.id].total_pnl >= 0 ? '#4caf50' : '#f44336'}`
+                    }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', fontSize: '13px' }}>
+                        <div>
+                          <span style={{ color: '#7f8c8d' }}>总盈亏:</span>
+                          <div style={{
+                            fontWeight: 'bold',
+                            fontSize: '16px',
+                            color: pnlData[trader.id].total_pnl >= 0 ? '#2e7d32' : '#c62828'
+                          }}>
+                            {pnlData[trader.id].total_pnl >= 0 ? '+' : ''}{pnlData[trader.id].total_pnl.toFixed(2)} USDT
+                          </div>
+                        </div>
+                        <div>
+                          <span style={{ color: '#7f8c8d' }}>盈亏率:</span>
+                          <div style={{
+                            fontWeight: 'bold',
+                            fontSize: '16px',
+                            color: pnlData[trader.id].pnl_pct >= 0 ? '#2e7d32' : '#c62828'
+                          }}>
+                            {pnlData[trader.id].pnl_pct >= 0 ? '+' : ''}{pnlData[trader.id].pnl_pct.toFixed(2)}%
+                          </div>
+                        </div>
+                        <div>
+                          <span style={{ color: '#7f8c8d' }}>当前持仓:</span>
+                          <div style={{ fontWeight: 'bold' }}>
+                            {pnlData[trader.id].current_position.toFixed(6)} BTC
+                          </div>
+                        </div>
+                        <div>
+                          <span style={{ color: '#7f8c8d' }}>当前价值:</span>
+                          <div style={{ fontWeight: 'bold' }}>
+                            ${pnlData[trader.id].current_value.toFixed(2)}
+                          </div>
+                        </div>
+                      </div>
+                      <div style={{ marginTop: '8px', fontSize: '12px', color: '#666', borderTop: '1px solid #ddd', paddingTop: '8px' }}>
+                        <span>已实现: {pnlData[trader.id].realized_pnl.toFixed(2)} USDT</span>
+                        <span style={{ marginLeft: '15px' }}>未实现: {pnlData[trader.id].unrealized_pnl.toFixed(2)} USDT</span>
+                        <span style={{ marginLeft: '15px' }}>总成本: {pnlData[trader.id].total_cost.toFixed(2)} USDT</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* ✅ Phase 3.5 - P1: 止损止盈状态 */}
+                  {(trader.config.stop_loss_pct || trader.config.take_profit_pct) && (
+                    <div style={{
+                      padding: '8px 12px',
+                      backgroundColor: '#fff3cd',
+                      borderRadius: '4px',
+                      fontSize: '12px',
+                      marginBottom: '10px',
+                      border: '1px solid #ffc107'
+                    }}>
+                      {trader.config.stop_loss_pct && (
+                        <span style={{ marginRight: '15px' }}>
+                          🛡️ 止损: {trader.config.stop_loss_pct}%
+                        </span>
+                      )}
+                      {trader.config.take_profit_pct && (
+                        <span>
+                          🎯 止盈: {trader.config.take_profit_pct}%
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {trader.runtime_status && (
                     <div style={{ 
