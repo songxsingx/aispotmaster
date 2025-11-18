@@ -21,7 +21,11 @@ interface Trader {
   }
 }
 
-function Traders() {
+interface Props {
+  onViewDetail: (traderId: string) => void
+}
+
+function Traders({ onViewDetail }: Props) {
   const [traders, setTraders] = useState<Trader[]>([])
   const [loading, setLoading] = useState(false)
   const [showCreateForm, setShowCreateForm] = useState(true)  // 默认展开表单
@@ -349,7 +353,23 @@ function Traders() {
                   )}
                 </div>
 
-                <div style={{ display: 'flex', gap: '10px', marginLeft: '20px' }}>
+                <div style={{ display: 'flex', gap: '10px', marginLeft: '20px', flexDirection: 'column' }}>
+                  <button
+                    onClick={() => onViewDetail(trader.id)}
+                    style={{
+                      padding: '8px 16px',
+                      backgroundColor: '#3498db',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: '4px',
+                      cursor: 'pointer',
+                      fontWeight: 'bold',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    📈 查看详情
+                  </button>
+                  
                   {trader.status === 'stopped' ? (
                     <button
                       onClick={() => handleStart(trader.id)}

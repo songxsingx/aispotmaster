@@ -19,6 +19,8 @@ class GateIOExchange:
             api_secret: API密钥
             testnet: 是否使用测试网
         """
+        self.last_valid_price = None  # ✅ 缓存最后的有效价格
+        
         self.exchange = ccxt.gateio({
             'apiKey': api_key,
             'secret': api_secret,
@@ -29,59 +31,106 @@ class GateIOExchange:
             # Gate.io 测试网配置
             self.exchange.set_sandbox_mode(True)
     
-    def get_balance(self, currency: str = 'USDT') -> Dict:
+    def get_balance(self, currency: Optional[str] = None) -> Dict:
         """
         获取余额
         
         Args:
-            currency: 币种，默认USDT
+            currency: 币种，默认None（返回所有币种）
             
         Returns:
             余额信息字典
         """
         try:
             balance = self.exchange.fetch_balance()
-            return {
-                'currency': currency,
-                'free': float(balance.get(currency, {}).get('free', 0)),
-                'used': float(balance.get(currency, {}).get('used', 0)),
-                'total': float(balance.get(currency, {}).get('total', 0))
-            }
+            
+            # 如果指定了币种，只返回该币种
+            if currency:
+                return {
+                    'currency': currency,
+                    'free': float(balance.get(currency, {}).get('free', 0)),
+                    'used': float(balance.get(currency, {}).get('used', 0)),
+                    'total': float(balance.get(currency, {}).get('total', 0))
+                }
+            
+            # 返回所有币种（为 grid.py 等策略使用）
+            return balance
+            
         except Exception as e:
             # 如果没有API密钥，返回模拟数据
-            return {
-                'currency': currency,
-                'free': 1000.0,
-                'used': 0.0,
-                'total': 1000.0,
-                'demo': True
-            }
+            if currency:
+                return {
+                    'currency': currency,
+                    'free': 1000.0,
+                    'used': 0.0,
+                    'total': 1000.0,
+                    'demo': True
+                }
+            else:
+                # 返回模拟的完整余额
+                return {
+                    'USDT': {'free': 1000.0, 'used': 0.0, 'total': 1000.0},
+                    'BTC': {'free': 0.0, 'used': 0.0, 'total': 0.0},
+                    'demo': True
+                }
     
     def get_ticker(self, symbol: str = 'BTC/USDT') -> Dict:
-        """获取行情"""
-        try:
-            ticker = self.exchange.fetch_ticker(symbol)
+        """获取行情 - 带重试机制和缓存"""
+        max_retries = 3
+        retry_delay = 1  # 秒
+        
+        for attempt in range(max_retries):
+            try:
+                ticker = self.exchange.fetch_ticker(symbol)
+                
+                # 验证数据完整性
+                if not ticker or 'last' not in ticker:
+                    raise ValueError("返回数据不完整")
+                
+                last_price = float(ticker['last'])
+                
+                # 验证价格合理性（BTC价格应该在10K-200K之间）
+                if last_price < 10000 or last_price > 200000:
+                    print(f"⚠️ 异常价格: ${last_price:,.2f}，重试中...")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                
+                # 缓存最后的有效价格
+                self.last_valid_price = last_price
+                
+                return {
+                    'symbol': symbol,
+                    'last': last_price,
+                    'bid': float(ticker.get('bid', last_price)),
+                    'ask': float(ticker.get('ask', last_price)),
+                    'high': float(ticker.get('high', last_price)),
+                    'low': float(ticker.get('low', last_price)),
+                    'volume': float(ticker.get('baseVolume', 0))
+                }
+                
+            except Exception as e:
+                print(f"⚠️ 获取行情失败 (尝试{attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay)
+                    continue
+        
+        # 所有重试都失败，使用缓存的价格
+        if hasattr(self, 'last_valid_price') and self.last_valid_price:
+            print(f"⚠️ 使用缓存价格: ${self.last_valid_price:,.2f}")
             return {
                 'symbol': symbol,
-                'last': float(ticker['last']),
-                'bid': float(ticker['bid']),
-                'ask': float(ticker['ask']),
-                'high': float(ticker['high']),
-                'low': float(ticker['low']),
-                'volume': float(ticker['baseVolume'])
+                'last': self.last_valid_price,
+                'bid': self.last_valid_price,
+                'ask': self.last_valid_price,
+                'high': self.last_valid_price,
+                'low': self.last_valid_price,
+                'volume': 0,
+                'cached': True
             }
-        except Exception as e:
-            # 返回模拟数据
-            return {
-                'symbol': symbol,
-                'last': 43250.5,
-                'bid': 43250.0,
-                'ask': 43251.0,
-                'high': 43500.0,
-                'low': 43000.0,
-                'volume': 1234.56,
-                'demo': True
-            }
+        
+        # 完全没有有效数据，抛出异常（不返回虚假的模拟价格）
+        raise Exception(f"无法获取{symbol}的有效行情数据，且无缓存可用")
     
     def market_buy(self, symbol: str, amount: float) -> Dict:
         """

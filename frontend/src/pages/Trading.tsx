@@ -64,10 +64,11 @@ function Trading() {
     }
   }
 
-  // 加载交易历史
+  // 加载交易历史（仅手动交易）
   const loadTrades = async () => {
     try {
-      const response = await apiClient.get('/api/trades')
+      // ✅ 只加载手动交易记录
+      const response = await apiClient.get('/api/trades?trader_id=manual')
       setTrades(response.data.data)
     } catch (error) {
       console.error('加载交易历史失败:', error)
@@ -109,11 +110,11 @@ function Trading() {
     loadTicker()
     loadTrades()
     
-    // 每30秒刷新一次
+    // 每5秒刷新一次（符合PROJECT_SPEC.md规范）
     const interval = setInterval(() => {
       loadBalance()
       loadTicker()
-    }, 30000)
+    }, 5000)
     
     return () => clearInterval(interval)
   }, [])

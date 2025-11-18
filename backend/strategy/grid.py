@@ -41,6 +41,41 @@ class GridStrategy(BaseStrategy):
         self.last_price = None
         self.last_action = None
         self.trade_count = 0
+        
+        # ✅ Phase 3.5: 持仓追踪（现货交易约束）
+        self.current_position = self._load_position()  # 从数据库加载当前持仓
+        self.avg_cost = 0  # 平均成本（未来用于盈亏计算）
+    
+    def _load_position(self) -> float:
+        """
+        从trades表计算当前持仓
+        
+        现货交易约束：持仓 = SUM(买入) - SUM(卖出) >= 0
+        
+        Returns:
+            当前持仓数量（BTC）
+        """
+        conn = sqlite3.connect('data/database.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT 
+                SUM(CASE WHEN action='buy' THEN amount ELSE 0 END) as bought,
+                SUM(CASE WHEN action='sell' THEN amount ELSE 0 END) as sold
+            FROM trades 
+            WHERE trader_id = ? AND symbol = ?
+        ''', (self.trader_id, self.symbol))
+        
+        row = cursor.fetchone()
+        conn.close()
+        
+        bought = row[0] or 0
+        sold = row[1] or 0
+        position = bought - sold
+        
+        print(f"[{self.trader_id}] 加载持仓: 买入{bought:.6f} - 卖出{sold:.6f} = {position:.6f} BTC")
+        
+        return position
     
     def run(self):
         """运行网格策略"""
@@ -65,29 +100,43 @@ class GridStrategy(BaseStrategy):
                 
                 # 价格下跌超过网格间隔 → 买入
                 if price_change_pct <= -self.grid_gap and self.last_action != 'buy':
-                    print(f"[{self.trader_id}] 价格下跌 {price_change_pct:.2f}% → 买入 {self.amount} BTC @ ${current_price:,.2f}")
-                    try:
-                        result = self.exchange.market_buy(self.symbol, self.amount)
-                        self._save_trade(result)
-                        self.last_price = current_price
-                        self.last_action = 'buy'
-                        self.trade_count += 1
-                        print(f"[{self.trader_id}] ✅ 买入成功，订单ID: {result['order_id']}")
-                    except Exception as e:
-                        print(f"[{self.trader_id}] ❌ 买入失败: {e}")
+                    # ✅ Phase 3.5: 买入前检查余额
+                    balance = self.exchange.get_balance()
+                    usdt_free = balance.get('USDT', {}).get('free', 0)
+                    cost = self.amount * current_price
+                    
+                    if usdt_free < cost:
+                        print(f"[{self.trader_id}] ⚠️ 余额不足({usdt_free:.2f} USDT < {cost:.2f} USDT)，跳过买入")
+                    else:
+                        print(f"[{self.trader_id}] 价格下跌 {price_change_pct:.2f}% → 买入 {self.amount} BTC @ ${current_price:,.2f}")
+                        try:
+                            result = self.exchange.market_buy(self.symbol, self.amount)
+                            self._save_trade(result)
+                            self.current_position += self.amount  # ✅ 更新持仓
+                            self.last_price = current_price
+                            self.last_action = 'buy'
+                            self.trade_count += 1
+                            print(f"[{self.trader_id}] ✅ 买入成功，当前持仓: {self.current_position:.6f} BTC")
+                        except Exception as e:
+                            print(f"[{self.trader_id}] ❌ 买入失败: {e}")
                 
                 # 价格上涨超过网格间隔 → 卖出
                 elif price_change_pct >= self.grid_gap and self.last_action != 'sell':
-                    print(f"[{self.trader_id}] 价格上涨 {price_change_pct:.2f}% → 卖出 {self.amount} BTC @ ${current_price:,.2f}")
-                    try:
-                        result = self.exchange.market_sell(self.symbol, self.amount)
-                        self._save_trade(result)
-                        self.last_price = current_price
-                        self.last_action = 'sell'
-                        self.trade_count += 1
-                        print(f"[{self.trader_id}] ✅ 卖出成功，订单ID: {result['order_id']}")
-                    except Exception as e:
-                        print(f"[{self.trader_id}] ❌ 卖出失败: {e}")
+                    # ✅ Phase 3.5: 卖出前检查持仓（现货不能卖空）
+                    if self.current_position < self.amount:
+                        print(f"[{self.trader_id}] ⚠️ 持仓不足({self.current_position:.6f} BTC < {self.amount} BTC)，跳过卖出")
+                    else:
+                        print(f"[{self.trader_id}] 价格上涨 {price_change_pct:.2f}% → 卖出 {self.amount} BTC @ ${current_price:,.2f}")
+                        try:
+                            result = self.exchange.market_sell(self.symbol, self.amount)
+                            self._save_trade(result)
+                            self.current_position -= self.amount  # ✅ 更新持仓
+                            self.last_price = current_price
+                            self.last_action = 'sell'
+                            self.trade_count += 1
+                            print(f"[{self.trader_id}] ✅ 卖出成功，当前持仓: {self.current_position:.6f} BTC")
+                        except Exception as e:
+                            print(f"[{self.trader_id}] ❌ 卖出失败: {e}")
                 
                 else:
                     # 价格变化未达到网格间隔
@@ -112,9 +161,16 @@ class GridStrategy(BaseStrategy):
         conn = sqlite3.connect('data/database.db')
         cursor = conn.cursor()
         
+        # ✅ Phase 3.5: 计算持仓变化
+        position_before = self.current_position
+        if trade_data['action'] == 'buy':
+            position_after = self.current_position + trade_data['amount']
+        else:  # sell
+            position_after = self.current_position - trade_data['amount']
+        
         cursor.execute('''
-            INSERT INTO trades (trader_id, strategy, symbol, action, price, amount, cost, fee_amount, timestamp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO trades (trader_id, strategy, symbol, action, price, amount, cost, fee_amount, timestamp, position_before, position_after)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             self.trader_id,
             'grid',
@@ -124,7 +180,9 @@ class GridStrategy(BaseStrategy):
             trade_data['amount'],
             trade_data['cost'],
             trade_data.get('fee', 0),
-            trade_data['timestamp']
+            trade_data['timestamp'],
+            position_before,
+            position_after
         ))
         
         conn.commit()
@@ -139,6 +197,7 @@ class GridStrategy(BaseStrategy):
             'trade_count': self.trade_count,
             'amount': self.amount,
             'grid_gap': self.grid_gap,
-            'check_interval': self.check_interval
+            'check_interval': self.check_interval,
+            'current_position': self.current_position  # ✅ Phase 3.5: 返回持仓信息
         })
         return status

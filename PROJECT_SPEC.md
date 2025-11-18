@@ -6182,7 +6182,120 @@ def generate_trade_prompt(market_data: dict) -> str:
 - [ ] 前端AI显示
 - [ ] 决策日志记录
 
+### Phase 3.5: 现货交易系统完善（补丁阶段）⚠️
+
+**重要：Phase 0-3 发现致命缺陷，必须先修复再进入 Phase 4**
+
+#### 现货交易约束（铁律）
+- ❌ 不能卖空（持仓不能为负）
+- ❌ 不能杠杆（不能借钱交易）
+- ✅ 必须先买入，才能卖出
+- ✅ 持仓 = SUM(买入) - SUM(卖出) ≥ 0
+- ✅ 余额 ≥ 买入所需金额
+
+#### P0 - 致命级（必须立即完成）
+
+**1. 持仓追踪系统**
+- [ ] backend/strategy/grid.py (+40行)
+  - 添加 `_load_position()` 方法：从trades表计算当前持仓
+  - 添加 `current_position` 属性：追踪BTC持仓
+  - 卖出前检查：`if self.current_position >= self.amount`
+  - 买入后更新：`self.current_position += self.amount`
+  - 卖出后更新：`self.current_position -= self.amount`
+
+**2. 余额检查**
+- [ ] backend/strategy/grid.py (+20行)
+  - 买入前查询USDT余额：`balance = self.exchange.get_balance()`
+  - 检查余额充足：`if usdt_free >= cost`
+  - 余额不足时跳过买入，记录日志
+
+**3. 数据库完整性**
+- [ ] backend/data/migrations/003_position_tracking.sql (新建)
+  - `ALTER TABLE trades ADD COLUMN position_before REAL DEFAULT 0`
+  - `ALTER TABLE trades ADD COLUMN position_after REAL DEFAULT 0`
+  - `ALTER TABLE trades ADD COLUMN is_real INTEGER DEFAULT 0`
+  - 回填历史数据的持仓信息
+
+**4. 异常恢复机制**
+- [ ] backend/core/trader.py (+30行)
+  - 后端重启时，从trades表重建持仓状态
+  - 启动策略前验证数据一致性
+  - 检测到持仓异常时拒绝启动
+
+**验收标准（P0）：**
+- ✅ 数据库约束：`SUM(buy_amount) >= SUM(sell_amount)` 永远成立
+- ✅ 创建交易员，运行3小时，持仓数据准确
+- ✅ 后端重启后，持仓数据不丢失
+- ✅ 余额不足时，不执行买入
+- ✅ 持仓不足时，不执行卖出
+- ✅ 用户验证通过 → git commit + push
+
+---
+
+#### P1 - 严重级（本周完成）
+
+**5. 盈亏计算系统**
+- [ ] backend/api/trader.py - 新增API
+  - `GET /api/traders/{id}/pnl` (新建，80行)
+  - 计算已实现盈亏（配对买卖）
+  - 计算未实现盈亏（当前持仓 × 价差）
+  - 返回：realized_pnl, unrealized_pnl, total_pnl, pnl_pct
+
+- [ ] frontend/src/pages/Traders.tsx (+50行)
+  - 显示实时盈亏
+  - 绿色（盈利）/ 红色（亏损）
+  - 显示盈亏率百分比
+
+**6. 止损止盈（现货版本）**
+- [ ] backend/strategy/grid.py (+50行)
+  - 配置参数：`stop_loss_pct=-10`, `take_profit_pct=20`
+  - 每次循环检查盈亏率
+  - 触发止损：卖出全部持仓，停止策略
+  - 触发止盈：卖出全部持仓，停止策略
+  - 记录触发日志
+
+- [ ] frontend/src/pages/Traders.tsx (+30行)
+  - 创建表单添加止损/止盈配置（可选）
+  - 显示止损/止盈状态
+
+**验收标准（P1）：**
+- ✅ 盈亏计算与手动计算一致（误差<0.1%）
+- ✅ 空仓时未实现盈亏=0
+- ✅ 模拟亏损场景，触发止损并卖出
+- ✅ 模拟盈利场景，触发止盈并卖出
+- ✅ 用户验证通过 → git commit + push
+
+---
+
+#### P2 - 重要级（2周完成）
+
+**7. UI完善**
+- [ ] frontend/src/pages/Traders.tsx (+80行)
+  - 显示创建时间（格式化timestamp）
+  - 显示运行时长（动态计算）
+  - 显示当前持仓（BTC数量）
+  - 显示账户余额（USDT/BTC）
+
+**8. 监控告警**
+- [ ] backend/core/trader.py (+40行)
+  - 余额预警：< 10 USDT
+  - 持仓异常预警：检测到负持仓
+  - 心跳检测：5分钟无更新
+  - 日志记录所有告警事件
+
+**验收标准（P2）：**
+- ✅ UI显示所有关键指标
+- ✅ 余额不足时触发告警
+- ✅ 策略卡死时检测到异常
+- ✅ 用户验证通过 → git commit + push
+
+**预计总时间：3天**
+
+---
+
 ### Phase 4+: 高级功能 ⏸️
+**Phase 3.5 完成并验证后，重新规划 Phase 4 详细方案**
+
 按需开发，参考23.3功能映射表
 ```
 

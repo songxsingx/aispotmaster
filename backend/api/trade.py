@@ -217,18 +217,33 @@ async def sell(symbol: str = "BTC/USDT", amount: float = 0.001):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/trades")
-async def get_trades(limit: int = 20):
-    """获取交易历史"""
+async def get_trades(limit: int = 20, trader_id: Optional[str] = None):
+    """
+    获取交易历史
+    
+    Args:
+        limit: 返回数量限制
+        trader_id: 交易员ID，可选（用于筛选特定交易员的记录）
+    """
     try:
         conn = sqlite3.connect('data/database.db')
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        cursor.execute('''
-            SELECT * FROM trades 
-            ORDER BY timestamp DESC 
-            LIMIT ?
-        ''', (limit,))
+        # ✅ 根据是否有trader_id参数构建不同的SQL
+        if trader_id:
+            cursor.execute('''
+                SELECT * FROM trades 
+                WHERE trader_id = ?
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (trader_id, limit))
+        else:
+            cursor.execute('''
+                SELECT * FROM trades 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            ''', (limit,))
         
         trades = [dict(row) for row in cursor.fetchall()]
         conn.close()

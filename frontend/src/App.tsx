@@ -1,9 +1,23 @@
 import { useState } from 'react'
 import Trading from './pages/Trading'
 import Traders from './pages/Traders'
+import TraderDetail from './pages/TraderDetail'
 
 function App() {
-  const [currentPage, setCurrentPage] = useState<'trading' | 'traders'>('trading')
+  const [currentPage, setCurrentPage] = useState<'trading' | 'traders' | 'trader-detail'>('trading')
+  const [selectedTraderId, setSelectedTraderId] = useState<string>('')
+
+  // ✅ 进入交易员详情
+  const handleViewTraderDetail = (traderId: string) => {
+    setSelectedTraderId(traderId)
+    setCurrentPage('trader-detail')
+  }
+
+  // ✅ 返回交易员列表
+  const handleBackToTraders = () => {
+    setCurrentPage('traders')
+    setSelectedTraderId('')
+  }
 
   return (
     <div>
@@ -48,7 +62,11 @@ function App() {
       </div>
 
       {/* 页面内容 */}
-      {currentPage === 'trading' ? <Trading /> : <Traders />}
+      {currentPage === 'trading' && <Trading />}
+      {currentPage === 'traders' && <Traders onViewDetail={handleViewTraderDetail} />}
+      {currentPage === 'trader-detail' && selectedTraderId && (
+        <TraderDetail traderId={selectedTraderId} onBack={handleBackToTraders} />
+      )}
     </div>
   )
 }
